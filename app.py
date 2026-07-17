@@ -16,6 +16,10 @@ from html import escape, unescape
 
 from flask import Flask, jsonify, render_template, request, send_file
 from openpyxl import load_workbook
+from reportlab.lib.colors import HexColor
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 15 * 1024 * 1024
@@ -353,6 +357,85 @@ def build_vector_pages(items: list[dict], start_date: str, end_date: str, densit
     return output
 
 
+def image_reader(source: str) -> ImageReader | None:
+    if not source:
+        return None
+    try:
+        if source.startswith("data:"):
+            raw = base64.b64decode(source.split(",", 1)[1])
+        else:
+            raw = fetch(source, timeout=8)
+        return ImageReader(io.BytesIO(raw))
+    except Exception:
+        return None
+
+
+def build_illustrator_pages(items: list[dict], start_date: str, end_date: str, density: str) -> list[bytes]:
+    columns = {"compacto": 5, "equilibrado": 4, "destaque": 3}.get(density, 4)
+    pages = paginate_tabloid(items, columns)
+    page_w, page_h = A4
+    margin, gap, header_h, footer_h = 18, 6, 82, 34
+    card_w = (page_w - margin * 2 - gap * (columns - 1)) / columns
+    card_h, section_h = 122, 22
+    results = []
+
+    def top_y(top: float, height: float = 0) -> float:
+        return page_h - top - height
+
+    for page_number, page_items in enumerate(pages, 1):
+        output = io.BytesIO()
+        pdf = canvas.Canvas(output, pagesize=A4, pageCompression=1)
+        pdf.setTitle("Tabloide Safari Editável")
+        pdf.setAuthor("Distribuidora Safari")
+
+        pdf.setFillColor(HexColor("#0d5c2e")); pdf.rect(0, top_y(0, header_h), page_w, header_h, fill=1, stroke=0)
+        pdf.setFillColor(HexColor("#f4e4a8")); pdf.setFont("Helvetica-Bold", 31); pdf.drawString(24, top_y(42), "SUPER")
+        pdf.setFillColor(HexColor("#ffffff")); pdf.setFont("Helvetica-Bold", 13); pdf.drawString(25, top_y(65), "O F E R T A S")
+        pdf.setFont("Helvetica-Bold", 18); pdf.drawRightString(page_w-24, top_y(35), "Distribuidora Safari")
+        pdf.setFillColor(HexColor("#d4af37")); pdf.roundRect(page_w-232, top_y(67, 20), 208, 20, 10, fill=1, stroke=0)
+        pdf.setFillColor(HexColor("#0d5c2e")); pdf.setFont("Helvetica-Bold", 8); pdf.drawCentredString(page_w-128, top_y(80), f"VÁLIDA DE {start_date} ATÉ {end_date}")
+
+        y, index, current_section = header_h + 13, 0, None
+        while index < len(page_items):
+            section = section_name(page_items[index].get("supplier", ""))
+            if section != current_section:
+                pdf.setFillColor(HexColor("#0d5c2e")); pdf.roundRect(margin, top_y(y, 19), 210, 19, 4, fill=1, stroke=0)
+                pdf.setFont("Helvetica-Bold", 8); pdf.setFillColor(HexColor("#ffffff")); pdf.drawString(margin+9, top_y(y+13), section.upper())
+                y += section_h; current_section = section
+            group = []
+            while index < len(page_items) and section_name(page_items[index].get("supplier", "")) == section and len(group) < columns:
+                group.append(page_items[index]); index += 1
+            for col, item in enumerate(group):
+                x = margin + col * (card_w + gap); bottom = top_y(y, card_h)
+                pdf.setFillColor(HexColor("#ffffff")); pdf.setStrokeColor(HexColor("#d9e3dc")); pdf.roundRect(x, bottom, card_w, card_h, 5, fill=1, stroke=1)
+                reader = image_reader(item.get("image_url") or "")
+                photo_x, photo_y, photo_w, photo_h = x+6, top_y(y+5, 48), card_w-12, 48
+                if reader:
+                    iw, ih = reader.getSize(); scale = min(photo_w/iw, photo_h/ih)
+                    dw, dh = iw*scale, ih*scale
+                    pdf.drawImage(reader, photo_x+(photo_w-dw)/2, photo_y+(photo_h-dh)/2, dw, dh, preserveAspectRatio=True, mask="auto")
+                else:
+                    pdf.setFillColor(HexColor("#f1f3f1")); pdf.rect(photo_x, photo_y, photo_w, photo_h, fill=1, stroke=0)
+                    pdf.setFillColor(HexColor("#9aa39c")); pdf.setFont("Helvetica-Bold", 7); pdf.drawCentredString(x+card_w/2, photo_y+22, "SEM FOTO")
+                pdf.setFillColor(HexColor("#6b7c72")); pdf.setFont("Helvetica-Bold", 6); pdf.drawString(x+6, top_y(y+62), f"Cód. {item.get('code','')}")
+                pdf.setFillColor(HexColor("#183024")); pdf.setFont("Helvetica-Bold", 6.4)
+                for line_no, line in enumerate(svg_text_lines(item.get("description", ""), 24 if columns >= 4 else 32, 3)):
+                    pdf.drawString(x+6, top_y(y+74+line_no*8), line)
+                pdf.setStrokeColor(HexColor("#d9e3dc")); pdf.setDash(2, 2); pdf.line(x+6, top_y(y+98), x+card_w-6, top_y(y+98)); pdf.setDash()
+                normal_i, normal_c = money(item.get("normal_price")); promo_i, promo_c = money(item.get("promo_price"))
+                pdf.setFillColor(HexColor("#6b7c72")); pdf.setFont("Helvetica", 6); pdf.drawString(x+6, top_y(y+108), f"De R$ {normal_i},{normal_c}")
+                pdf.setFillColor(HexColor("#d81f2b")); pdf.setFont("Helvetica-Bold", 13); pdf.drawString(x+6, top_y(y+120), f"R$ {promo_i},{promo_c}")
+            y += card_h + gap
+
+        footer_y = footer_h
+        pdf.setStrokeColor(HexColor("#0d5c2e")); pdf.setLineWidth(3); pdf.line(margin, footer_y, page_w-margin, footer_y)
+        pdf.setFillColor(HexColor("#6b7c72")); pdf.setFont("Helvetica", 5.8); pdf.drawString(margin, 17, "Após a validade, os preços voltarão ao normal. Imagens meramente ilustrativas.")
+        pdf.setFillColor(HexColor("#183024")); pdf.setFont("Helvetica-Bold", 6); pdf.drawRightString(page_w-42, 17, "(11) 2911-9888 · @distribuidorasafari")
+        pdf.drawRightString(page_w-margin, 17, f"{page_number}/{len(pages)}")
+        pdf.showPage(); pdf.save(); results.append(output.getvalue())
+    return results
+
+
 @app.post("/api/tabloid")
 def tabloid():
     body = request.get_json(force=True)
@@ -365,13 +448,13 @@ def tabloid():
 def vector():
     body = request.get_json(force=True)
     items = embed_images(body.get("items", []))
-    pages = build_vector_pages(items, body.get("start_date", ""), body.get("end_date", ""), body.get("density", "equilibrado"))
+    pages = build_illustrator_pages(items, body.get("start_date", ""), body.get("end_date", ""), body.get("density", "equilibrado"))
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        for index, svg in enumerate(pages, 1):
-            archive.writestr(f"tabloide_safari_pagina_{index:02d}.svg", svg.encode("utf-8"))
+        for index, ai in enumerate(pages, 1):
+            archive.writestr(f"tabloide_safari_pagina_{index:02d}.ai", ai)
     output.seek(0)
-    return send_file(output, as_attachment=True, download_name="tabloide_safari_vetor.zip", mimetype="application/zip")
+    return send_file(output, as_attachment=True, download_name="tabloide_safari_editavel.zip", mimetype="application/zip")
 
 
 if __name__ == "__main__":
