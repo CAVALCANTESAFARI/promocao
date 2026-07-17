@@ -23,3 +23,6 @@ O arquivo `render.yaml` permite publicar o projeto no Render usando **New > Blue
 2. Clique em **Buscar fotos**.
 3. Revise itens amarelos ou cole uma URL alternativa.
 4. Baixe a planilha atualizada ou todas as fotos em ZIP.
+5. Use **Gerar tabloide** para escolher as datas e a distribuição A4.
+
+O tabloide pode ser gerado em três densidades: Compacto, Equilibrado e Destaque. O HTML baixado está pronto para abrir no Chrome e imprimir ou salvar em PDF A4.
