@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import base64
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from html import escape, unescape
 
@@ -229,10 +231,62 @@ def section_name(supplier: str) -> str:
     return cleaned.title()
 
 
+def embed_images(items: list[dict]) -> list[dict]:
+    prepared = [dict(item) for item in items]
+    urls = {item.get("image_url") for item in prepared if item.get("image_url") and not item.get("image_url", "").startswith("data:")}
+
+    def download(url: str) -> tuple[str, str]:
+        try:
+            content = fetch(url, timeout=8)
+            path = urllib.parse.urlparse(url).path.lower()
+            mime = "image/png" if path.endswith(".png") else "image/webp" if path.endswith(".webp") else "image/jpeg"
+            return url, f"data:{mime};base64,{base64.b64encode(content).decode('ascii')}"
+        except Exception:
+            return url, url
+
+    embedded = {}
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = [pool.submit(download, url) for url in urls]
+        for future in as_completed(futures):
+            url, data = future.result()
+            embedded[url] = data
+    for item in prepared:
+        url = item.get("image_url")
+        if url in embedded:
+            item["image_url"] = embedded[url]
+    return prepared
+
+
+def paginate_tabloid(items: list[dict], columns: int) -> list[list[dict]]:
+    pages: list[list[dict]] = []
+    current: list[dict] = []
+
+    def estimated_height(page_items: list[dict]) -> float:
+        groups: list[tuple[str, int]] = []
+        for item in page_items:
+            section = section_name(item.get("supplier", ""))
+            if groups and groups[-1][0] == section:
+                groups[-1] = (section, groups[-1][1] + 1)
+            else:
+                groups.append((section, 1))
+        card_rows = sum((count + columns - 1) // columns for _, count in groups)
+        return len(groups) * 9.3 + card_rows * 45.5
+
+    for item in items:
+        candidate = current + [item]
+        if current and estimated_height(candidate) > 238:
+            pages.append(current)
+            current = [item]
+        else:
+            current = candidate
+    if current or not pages:
+        pages.append(current)
+    return pages
+
+
 def build_tabloid(items: list[dict], start_date: str, end_date: str, density: str) -> str:
-    per_page = {"compacto": 30, "equilibrado": 24, "destaque": 16}.get(density, 24)
-    columns = {"compacto": 5, "equilibrado": 4, "destaque": 4}.get(density, 4)
-    pages = [items[i:i + per_page] for i in range(0, len(items), per_page)] or [[]]
+    columns = {"compacto": 5, "equilibrado": 4, "destaque": 3}.get(density, 4)
+    pages = paginate_tabloid(items, columns)
     page_html = []
     for page_number, page_items in enumerate(pages, 1):
         cards, current_section = [], None
@@ -247,14 +301,15 @@ def build_tabloid(items: list[dict], start_date: str, end_date: str, density: st
             photo = f'<img class="product-photo" src="{image}" alt="Produto">' if image else '<div class="no-photo">SEM FOTO</div>'
             cards.append(f'<article class="card">{photo}<div class="card-body"><div class="cod">Cód. {escape(str(item.get("code", "")))}</div><div class="desc">{escape(item.get("description", ""))}</div></div><div class="price-row"><span class="de">De R$ {normal_i},{normal_c}</span><span class="por">R$ <b>{promo_i}</b><sup>,{promo_c}</sup></span></div></article>')
         page_html.append(f'<section class="a4-page" style="--cols:{columns}"><header><div class="hero-title">SUPER<small>OFERTAS</small></div><div class="brand"><b>Distribuidora <em>Safari</em></b><span>VÁLIDA DE {escape(start_date)} ATÉ {escape(end_date)}</span></div></header><main class="catalog">{"".join(cards)}</main><footer><span>Após a validade, os preços voltarão ao normal. Imagens meramente ilustrativas.</span><b>(11) 2911-9888 · @distribuidorasafari</b><i>{page_number}/{len(pages)}</i></footer></section>')
-    styles = '''@page{size:A4 portrait;margin:0}*{box-sizing:border-box}body{margin:0;background:#dfe8e1;font-family:Arial,sans-serif;color:#183024}.a4-page{width:210mm;height:297mm;margin:10mm auto;background:#fff;display:flex;flex-direction:column;overflow:hidden;page-break-after:always}header{height:29mm;background:linear-gradient(135deg,#0d5c2e,#1a8a44);padding:6mm 8mm;display:flex;justify-content:space-between;align-items:center;color:#fff}.hero-title{font-size:28pt;font-weight:1000;line-height:.75;color:#f4e4a8}.hero-title small{display:block;font-size:11pt;letter-spacing:4px;margin-top:4mm}.brand{text-align:right;display:flex;flex-direction:column;gap:3mm}.brand b{font-size:16pt}.brand em{color:#d4af37;font-style:normal}.brand span{background:#d4af37;color:#0d5c2e;padding:2mm 4mm;border-radius:99px;font-weight:800;font-size:8pt}.catalog{padding:4mm 6mm;display:grid;grid-template-columns:repeat(var(--cols),1fr);gap:2.3mm;align-content:start;flex:1;overflow:hidden}.section-title{grid-column:1/-1;border-bottom:1.2mm solid #0d5c2e;height:7mm;display:flex;align-items:end}.section-title span{background:#0d5c2e;color:#fff;padding:1.2mm 4mm;font-size:7.5pt;font-weight:900;text-transform:uppercase;border-radius:2mm 2mm 0 0}.card{border:.3mm solid #d9e3dc;border-radius:2mm;padding:2mm;display:flex;flex-direction:column;min-height:0;overflow:hidden;break-inside:avoid}.product-photo,.no-photo{width:100%;height:22mm;object-fit:contain;display:block}.no-photo{display:grid;place-items:center;background:#f1f3f1;color:#9aa39c;font-size:7pt;font-weight:bold}.card-body{flex:1}.cod{font-size:6pt;color:#6b7c72;font-weight:bold}.desc{font-size:6.8pt;font-weight:800;line-height:1.15;margin-top:1mm;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.price-row{border-top:.3mm dashed #d9e3dc;margin-top:1.5mm;padding-top:1mm}.de{display:block;font-size:6pt;color:#6b7c72;text-decoration:line-through}.por{color:#d81f2b;font-size:12pt;font-weight:1000}.por sup{font-size:7pt}footer{height:12mm;border-top:1mm solid #0d5c2e;margin:0 6mm;padding:2.5mm 0;display:flex;align-items:center;gap:4mm;font-size:6pt;color:#6b7c72}footer b{color:#183024;margin-left:auto}footer i{font-style:normal;font-weight:bold}@media print{body{background:#fff}.a4-page{margin:0}}@media screen{.a4-page{box-shadow:0 8px 32px #0002}}'''
+    styles = '''@page{size:A4 portrait;margin:0}*{box-sizing:border-box}body{margin:0;background:#dfe8e1;font-family:Arial,sans-serif;color:#183024}.a4-page{width:210mm;height:297mm;margin:10mm auto;background:#fff;display:flex;flex-direction:column;overflow:hidden;page-break-after:always}header{height:29mm;background:linear-gradient(135deg,#0d5c2e,#1a8a44);padding:6mm 8mm;display:flex;justify-content:space-between;align-items:center;color:#fff}.hero-title{font-size:28pt;font-weight:1000;line-height:.75;color:#f4e4a8}.hero-title small{display:block;font-size:11pt;letter-spacing:4px;margin-top:4mm}.brand{text-align:right;display:flex;flex-direction:column;gap:3mm}.brand b{font-size:16pt}.brand em{color:#d4af37;font-style:normal}.brand span{background:#d4af37;color:#0d5c2e;padding:2mm 4mm;border-radius:99px;font-weight:800;font-size:8pt}.catalog{padding:4mm 6mm;display:grid;grid-template-columns:repeat(var(--cols),1fr);grid-auto-flow:row;gap:2.3mm;align-content:start;flex:1;overflow:hidden}.section-title{grid-column:1/-1;border-bottom:1.2mm solid #0d5c2e;height:7mm;display:flex;align-items:end}.section-title span{background:#0d5c2e;color:#fff;padding:1.2mm 4mm;font-size:7.5pt;font-weight:900;text-transform:uppercase;border-radius:2mm 2mm 0 0}.card{height:43.2mm;border:.3mm solid #d9e3dc;border-radius:2mm;padding:2mm;display:flex;flex-direction:column;overflow:hidden;break-inside:avoid;background:#fff}.product-photo,.no-photo{width:100%;height:17mm;min-height:17mm;object-fit:contain;display:block}.no-photo{display:grid;place-items:center;background:#f1f3f1;color:#9aa39c;font-size:7pt;font-weight:bold}.card-body{height:12mm;min-height:12mm;overflow:hidden}.cod{font-size:6pt;color:#6b7c72;font-weight:bold}.desc{font-size:6.6pt;font-weight:800;line-height:1.15;margin-top:1mm;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.price-row{height:10mm;min-height:10mm;border-top:.3mm dashed #d9e3dc;margin-top:1mm;padding-top:1mm}.de{display:block;font-size:6pt;color:#6b7c72;text-decoration:line-through}.por{display:block;color:#d81f2b;font-size:12pt;font-weight:1000;line-height:1}.por sup{font-size:7pt}footer{height:12mm;border-top:1mm solid #0d5c2e;margin:0 6mm;padding:2.5mm 0;display:flex;align-items:center;gap:4mm;font-size:6pt;color:#6b7c72}footer b{color:#183024;margin-left:auto}footer i{font-style:normal;font-weight:bold}@media print{body{background:#fff}.a4-page{margin:0}}@media screen{.a4-page{box-shadow:0 8px 32px #0002}}'''
     return f'<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Tabloide Safari</title><style>{styles}</style></head><body>{"".join(page_html)}</body></html>'
 
 
 @app.post("/api/tabloid")
 def tabloid():
     body = request.get_json(force=True)
-    html = build_tabloid(body.get("items", []), body.get("start_date", ""), body.get("end_date", ""), body.get("density", "equilibrado"))
+    items = embed_images(body.get("items", []))
+    html = build_tabloid(items, body.get("start_date", ""), body.get("end_date", ""), body.get("density", "equilibrado"))
     return send_file(io.BytesIO(html.encode("utf-8")), as_attachment=True, download_name="tabloide_safari.html", mimetype="text/html; charset=utf-8")
 
 
