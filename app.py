@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import re
+import textwrap
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -305,12 +306,72 @@ def build_tabloid(items: list[dict], start_date: str, end_date: str, density: st
     return f'<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Tabloide Safari</title><style>{styles}</style></head><body>{"".join(page_html)}</body></html>'
 
 
+def svg_text_lines(text: str, width: int = 28, limit: int = 3) -> list[str]:
+    lines = textwrap.wrap(str(text), width=width, break_long_words=False, break_on_hyphens=False)
+    if len(lines) > limit:
+        lines = lines[:limit]
+        lines[-1] = lines[-1].rstrip(" .") + "…"
+    return lines or [""]
+
+
+def build_vector_pages(items: list[dict], start_date: str, end_date: str, density: str) -> list[str]:
+    columns = {"compacto": 5, "equilibrado": 4, "destaque": 3}.get(density, 4)
+    pages = paginate_tabloid(items, columns)
+    width, height, margin, gap = 794, 1123, 24, 8
+    card_width = (width - margin * 2 - gap * (columns - 1)) / columns
+    card_height, section_height = 163, 29
+    output = []
+    for page_number, page_items in enumerate(pages, 1):
+        elements = [f'''<rect width="794" height="1123" fill="#ffffff"/><defs><linearGradient id="hero" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#0d5c2e"/><stop offset="1" stop-color="#1a8a44"/></linearGradient><clipPath id="photo"><rect width="{card_width-14:.1f}" height="62" rx="4"/></clipPath></defs><rect width="794" height="110" fill="url(#hero)"/><text x="30" y="58" font-family="Arial" font-size="43" font-weight="900" fill="#f4e4a8">SUPER</text><text x="32" y="87" font-family="Arial" font-size="18" font-weight="800" letter-spacing="5" fill="#ffffff">OFERTAS</text><text x="764" y="48" text-anchor="end" font-family="Arial" font-size="24" font-weight="800" fill="#ffffff">Distribuidora <tspan fill="#d4af37">Safari</tspan></text><rect x="485" y="64" width="279" height="27" rx="14" fill="#d4af37"/><text x="624" y="82" text-anchor="middle" font-family="Arial" font-size="11" font-weight="800" fill="#0d5c2e">VÁLIDA DE {escape(start_date)} ATÉ {escape(end_date)}</text>''']
+        y, index, current_section = 126, 0, None
+        while index < len(page_items):
+            section = section_name(page_items[index].get("supplier", ""))
+            if section != current_section:
+                elements.extend([f'<rect x="{margin}" y="{y}" width="{width-margin*2}" height="5" fill="#0d5c2e"/>', f'<rect x="{margin}" y="{y-21}" width="260" height="26" rx="5" fill="#0d5c2e"/>', f'<text x="{margin+12}" y="{y-4}" font-family="Arial" font-size="11" font-weight="800" fill="#ffffff">{escape(section.upper())}</text>'])
+                y += section_height
+                current_section = section
+            group = []
+            while index < len(page_items) and section_name(page_items[index].get("supplier", "")) == section and len(group) < columns:
+                group.append(page_items[index]); index += 1
+            for col, item in enumerate(group):
+                x = margin + col * (card_width + gap)
+                code = escape(str(item.get("code", "")))
+                normal_i, normal_c = money(item.get("normal_price")); promo_i, promo_c = money(item.get("promo_price"))
+                elements.append(f'<rect x="{x:.1f}" y="{y}" width="{card_width:.1f}" height="{card_height}" rx="7" fill="#ffffff" stroke="#d9e3dc"/>')
+                image = item.get("image_url") or ""
+                if image:
+                    elements.append(f'<image href="{escape(image)}" x="{x+7:.1f}" y="{y+7}" width="{card_width-14:.1f}" height="62" preserveAspectRatio="xMidYMid meet"/>')
+                else:
+                    elements.extend([f'<rect x="{x+7:.1f}" y="{y+7}" width="{card_width-14:.1f}" height="62" fill="#f1f3f1"/>', f'<text x="{x+card_width/2:.1f}" y="{y+42}" text-anchor="middle" font-family="Arial" font-size="9" fill="#9aa39c">SEM FOTO</text>'])
+                elements.append(f'<text x="{x+8:.1f}" y="{y+81}" font-family="Arial" font-size="8" font-weight="700" fill="#6b7c72">Cód. {code}</text>')
+                for line_no, line in enumerate(svg_text_lines(item.get("description", ""), 25 if columns >= 4 else 34)):
+                    elements.append(f'<text x="{x+8:.1f}" y="{y+96+line_no*10}" font-family="Arial" font-size="8.5" font-weight="700" fill="#183024">{escape(line)}</text>')
+                elements.extend([f'<line x1="{x+8:.1f}" y1="{y+128}" x2="{x+card_width-8:.1f}" y2="{y+128}" stroke="#d9e3dc" stroke-dasharray="3 3"/>', f'<text x="{x+8:.1f}" y="{y+140}" font-family="Arial" font-size="8" fill="#6b7c72" text-decoration="line-through">De R$ {normal_i},{normal_c}</text>', f'<text x="{x+8:.1f}" y="{y+157}" font-family="Arial" font-size="16" font-weight="900" fill="#d81f2b">R$ {promo_i}<tspan font-size="10">,{promo_c}</tspan></text>'])
+            y += card_height + gap
+        elements.extend([f'<line x1="24" y1="1076" x2="770" y2="1076" stroke="#0d5c2e" stroke-width="4"/>', '<text x="24" y="1095" font-family="Arial" font-size="8" fill="#6b7c72">Após a validade, os preços voltarão ao normal. Imagens meramente ilustrativas.</text>', '<text x="660" y="1095" text-anchor="end" font-family="Arial" font-size="8" font-weight="700" fill="#183024">(11) 2911-9888 · @distribuidorasafari</text>', f'<text x="770" y="1095" text-anchor="end" font-family="Arial" font-size="8" font-weight="700" fill="#183024">{page_number}/{len(pages)}</text>'])
+        output.append(f'''<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="210mm" height="297mm" viewBox="0 0 794 1123">{"".join(elements)}</svg>''')
+    return output
+
+
 @app.post("/api/tabloid")
 def tabloid():
     body = request.get_json(force=True)
     items = embed_images(body.get("items", []))
     html = build_tabloid(items, body.get("start_date", ""), body.get("end_date", ""), body.get("density", "equilibrado"))
     return send_file(io.BytesIO(html.encode("utf-8")), as_attachment=True, download_name="tabloide_safari.html", mimetype="text/html; charset=utf-8")
+
+
+@app.post("/api/vector")
+def vector():
+    body = request.get_json(force=True)
+    items = embed_images(body.get("items", []))
+    pages = build_vector_pages(items, body.get("start_date", ""), body.get("end_date", ""), body.get("density", "equilibrado"))
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for index, svg in enumerate(pages, 1):
+            archive.writestr(f"tabloide_safari_pagina_{index:02d}.svg", svg.encode("utf-8"))
+    output.seek(0)
+    return send_file(output, as_attachment=True, download_name="tabloide_safari_vetor.zip", mimetype="application/zip")
 
 
 if __name__ == "__main__":

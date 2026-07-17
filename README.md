@@ -26,3 +26,5 @@ O arquivo `render.yaml` permite publicar o projeto no Render usando **New > Blue
 5. Use **Gerar tabloide** para escolher as datas e a distribuição A4.
 
 O tabloide pode ser gerado em três densidades: Compacto, Equilibrado e Destaque. O HTML baixado está pronto para abrir no Chrome e imprimir ou salvar em PDF A4.
+
+O botão **Gerar vetor editável (SVG)** baixa um ZIP com uma página A4 por arquivo. Textos, preços, cores e formas permanecem editáveis no CorelDRAW, Illustrator ou Inkscape.
